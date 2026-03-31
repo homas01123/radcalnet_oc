@@ -23,7 +23,6 @@ dynamic = ["dependencies"]
 where = ["."]
 
 [tool.setuptools.package-data]
-#"grs"= []
 "radcalnet_oc"= ['*.yml',
                  'data/lut/gases/*.nc',
                  'data/lut/atmo/*.nc',
@@ -33,7 +32,7 @@ where = ["."]
 "*" = [".gitattributes"]
 
 [project.scripts]
-grs = "radcalnet_oc.run:main"
+radcalnet_oc = "radcalnet_oc.run:main"
 
 #dynamic = ["dependencies"]
 [tool.setuptools.dynamic]

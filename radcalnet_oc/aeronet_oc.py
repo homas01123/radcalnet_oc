@@ -22,6 +22,8 @@ class Aeronet:
     def get_aeronet_oc_site_info(self):
         self.aeronet_oc_site_info = pd.read_csv(aeronet_oc_location_file, index_col=0)
 
+
+
     def read_aeronet_ocv3(self,
                           ifile,
                           skiprows=8,

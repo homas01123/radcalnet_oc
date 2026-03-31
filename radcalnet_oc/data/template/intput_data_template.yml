@@ -1,0 +1,62 @@
+#with open('./radcalnet_oc/data/template/intput_data_template.yml', 'r') as file:
+#
+#    config = yaml.safe_load(file)
+#xr.Dataset.from_dict(config)
+
+
+attrs: {}
+coords:
+  time:
+    attrs: {}
+    data: []
+    dims: "time"
+  wl:
+    attrs: {}
+    data: []
+    dims: "wl"
+data_vars:
+
+  aot550:
+    attrs: {}
+    data: []
+    dims: "time"
+  day_of_year:
+    attrs: {}
+    data: []
+    dims: "time"
+  Lw:
+    attrs:
+      description: "water-leaving radiance at 0+ (above surface)"
+      unit: "mW m-2 sr-1 nm-1"
+    data: []
+    dims: ["time"]
+
+  pressure:
+    attrs:
+      unit: hPa
+    data: [ ]
+    dims: "time"
+  sza:
+    attrs: { }
+    data: [ ]
+    dims: "time"
+  tcno2:
+    attrs:
+      unit: kg.m-2
+    data: [ ]
+    dims: "time"
+  tco3:
+    attrs:
+      unit: kg.m-2
+    data: [ ]
+    dims: "time"
+  tcwv:
+    attrs:
+      unit: kg.m-2
+    data: [ ]
+    dims: "time"
+
+
+dims:
+  wl: []
+  time: []

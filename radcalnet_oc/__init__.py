@@ -11,8 +11,16 @@ Version history
 __package__ = 'radcalnet_oc'
 __version__ = '0.0.1'
 
-
-from .acutils import Aerosol, Misc, GaseousTransmittance
 from .lut import LUT, AuxData, SolarIrradiance, Spectral
-from .kernel import Kernel
+from .kernel import Aerosol, Misc, GaseousTransmittance
+from .process import Process
 from .aeronet_oc import Aeronet
+
+
+import logging
+
+#init logger
+logger = logging.getLogger()
+
+level = logging.getLevelName("INFO")
+logger.setLevel(level)

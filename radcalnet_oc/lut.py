@@ -29,7 +29,6 @@ sunglint_eps_file = files('radcalnet_oc.data.auxdata').joinpath('mean_rglint_sma
 rayleigh_file = files('radcalnet_oc.data.auxdata').joinpath('rayleigh_bodhaine.txt')
 LUT_FILE_BACKUP = files('radcalnet_oc.data.lut.atmo').joinpath('toa_lut_opac_ultra_light.nc')
 
-
 # --------------------------------------------------
 # get path of other files as indicated in config.yml
 # --------------------------------------------------
@@ -44,6 +43,9 @@ TRANSLUT = files('radcalnet_oc.data.lut.atmo').joinpath(TRANSLUT)
 CAMS_PATH = config['path']['trans_lut']
 NCPU = config['processor']['ncpu']
 NETCDF_ENGINE = config['processor']['netcdf_engine']
+
+AEROSOL_MODELS = config['settings']['aerosol_models']
+AEROSOL_COMBINATION = config['settings']['aerosol_combination']
 
 
 @njit(fastmath=True)
@@ -137,14 +139,15 @@ class LUT:
 
         logging.info('loading look-up tables')
         self.trans_lut = xr.open_dataset(self.trans_lut_file, engine=NETCDF_ENGINE)
+
+
         # convert wavelength in nanometer
         self.trans_lut['wl'] = self.trans_lut['wl'] * 1000
         self.trans_lut['wl'].attrs['description'] = 'wavelength of simulation (nanometer)'
         try:
             self.aero_lut = xr.open_dataset(self.lut_file, engine=NETCDF_ENGINE)
-
         except:
-            logging.info('LUT file '+self.lut_file+' not found, please download and save it the proper directory')
+            logging.info('LUT file ' + self.lut_file + ' not found, please download and save it the proper directory')
             logging.info('LUT has been replaced with light dataset that might produce inaccuracies')
             self.aero_lut = xr.open_dataset(LUT_FILE_BACKUP, engine=NETCDF_ENGINE)
 
@@ -153,8 +156,11 @@ class LUT:
         self.aero_lut['wl'].attrs['description'] = 'wavelength of simulation (nanometer)'
         self.aero_lut['aot'] = self.aero_lut.aot.isel(wind=0).squeeze()
 
-        self.gas_lut = xr.open_dataset(self.abs_gas_file, engine='h5netcdf')
-        self.Twv_lut = xr.open_dataset(self.water_vapor_transmittance_file, engine='h5netcdf')
+        # get normalized aot for aerosol model fitting
+        self.naot_lut = self.aero_lut.aot.interp(aot_ref=0.1) / 0.1
+
+        self.gas_lut = xr.open_dataset(self.abs_gas_file, engine=NETCDF_ENGINE)
+        self.Twv_lut = xr.open_dataset(self.water_vapor_transmittance_file, engine=NETCDF_ENGINE)
 
     def lut_preparation(self,
                         wind=2,
@@ -162,32 +168,79 @@ class LUT:
                         vza=[0],
                         azi=[0],
                         aot_refs=np.linspace(0.0, 0.8, 25),
-                        weights=[0, 0.5, 1, 0., 0.]):
+                        aerosol_combination=AEROSOL_COMBINATION):
+
+        logging.info('LUT preparation')
+
+        if isinstance(aerosol_combination, (list, np.ndarray)):
+            aerosol_combination = xr.DataArray(aerosol_combination, coords={'model': AEROSOL_MODELS})
+        elif not isinstance(aerosol_combination, xr.DataArray):
+            logging.error("error in aerosol_combination parameter, should be numpy or xr.DataArray")
+            return
+
+        self.aerosol_combination=aerosol_combination
+
+        aero_lut = self.aero_lut.sel(wind=wind, method='nearest')
+        trans_lut = self.trans_lut.sel(wind=wind, method='nearest')
+
+        # -----------------------------
+        # interpolation transmittance
+        # -----------------------------
+        self.trans_aero_lut = trans_lut.interp(sza=[*sza, *vza]).sortby('sza')
+        self.trans_aero_lut = (self.trans_aero_lut * aerosol_combination).sum('model')
+        self.trans_aero_lut = self.trans_aero_lut.interp(aot_ref=aot_refs, method='quadratic')
+        #self.trans_aero_lut = self.trans_aero_lut.interp(wl=self.wl, method='quadratic')
+        # clean up the xarray DataArray object:
+        self.trans_aero_lut = self.trans_aero_lut.to_dataarray().squeeze().reset_coords(drop=True)
+
+        # -----------------------------
+        # interpolation Rayleigh
+        # -----------------------------
+        self.Rray = aero_lut.I.isel(model=0).interp(sza=sza, vza=vza).interp(azi=azi).interp(aot_ref=0,
+                                                                                             method='quadratic')
+        self.Rray = self.Rray / np.cos(np.radians(self.Rray.sza))
+        #self.Rray = self.Rray.interp(wl=self.wl, method='quadratic')
+
+        # -----------------------------
+        # interpolation atmo diffuse light
+        # -----------------------------
+        self.Rdiff_lut = aero_lut.I.interp(sza=sza, vza=vza).interp(azi=azi)
+        self.Rdiff_lut = (self.Rdiff_lut * aerosol_combination).sum('model')
+        self.Rdiff_lut = self.Rdiff_lut.interp(aot_ref=aot_refs, method='quadratic')
+        self.Rdiff_lut = self.Rdiff_lut / np.cos(np.radians(self.Rdiff_lut.sza))
+        #self.Rdiff_lut = self.Rdiff_lut.interp(wl=self.wl, method='quadratic')
+
+        self.aot_lut = (aero_lut.aot * aerosol_combination).sum('model')
+        self.aot_lut = self.aot_lut.interp(aot_ref=aot_refs,
+                                           method='quadratic'
+                                           )#.interp(wl=self.wl, method='quadratic')
+
+        self.szas = self.Rdiff_lut.sza.values
+        self.vzas = self.Rdiff_lut.vza.values
+        self.azis = self.Rdiff_lut.azi.values
+        self.aot_refs = self.Rdiff_lut.aot_ref.values
+
+        _auxdata = AuxData(wl=self.wl)  # wl=masked.wl)
+        self.sunglint_eps = _auxdata.sunglint_eps  # ['mean'].interp(wl=wl)
+        self.rot = _auxdata.rot
+
+    def lut_preparation_all_models(self,
+                                   wind=2,
+                                   sza=[20, 40, 60],
+                                   vza=[0],
+                                   azi=[0],
+                                   aot_refs=np.linspace(0.0, 0.8, 25),
+                                   ):
 
         logging.info('LUT preparation')
 
         aero_lut = self.aero_lut.sel(wind=wind, method='nearest')
         trans_lut = self.trans_lut.sel(wind=wind, method='nearest')
 
-        # set mixture of aerosol models
-        # ['ARCT_rh70', 'COAV_rh70', 'DESE_rh70', 'MACL_rh70', 'URBA_rh70']
-        for ii, weight in enumerate(weights):
-            if ii == 0:
-                mix_aero_lut_ = weight * aero_lut.isel(model=ii)
-                mix_trans_lut_ = weight * trans_lut.isel(model=ii)
-            else:
-                mix_aero_lut_ = mix_aero_lut_ + weight * aero_lut.isel(model=ii)
-                mix_trans_lut_ = mix_trans_lut_ + weight * trans_lut.isel(model=ii)
-        mix_aero_lut_ = mix_aero_lut_ / np.sum(weights)
-        mix_trans_lut_ = mix_trans_lut_ / np.sum(weights)
-
-        aero_lut = mix_aero_lut_
-        self.trans_aero_lut = mix_trans_lut_
-
         # -----------------------------
         # interpolation transmittance
         # -----------------------------
-        self.trans_aero_lut = self.trans_aero_lut.interp(sza=[*sza, *vza])
+        self.trans_aero_lut = trans_lut.interp(sza=[*sza, *vza])
         self.trans_aero_lut = self.trans_aero_lut.interp(aot_ref=aot_refs, method='quadratic')
         self.trans_aero_lut = self.trans_aero_lut.interp(wl=self.wl, method='quadratic')
         # clean up the xarray DataArray object:
@@ -343,11 +396,11 @@ class Spectral():
         self.central_wl = central_wl
         if not isinstance(fwhm, np.ndarray):
             fwhm = np.array([fwhm] * len(central_wl))
-
-        self.fwhm = xr.DataArray(fwhm, name='fwhm',
-                                 coords={'wl': central_wl},
-                                 attrs={
-                                     'definition': 'full width at half maximum of spectral responses modeled as gaussian distributions'})
+        fwhm = xr.DataArray(fwhm, name='fwhm',
+                            coords={'wl': central_wl},
+                            attrs={
+                                'definition': 'full width at half maximum of spectral responses modeled as gaussian distributions'})
+        self.fwhm = fwhm
 
     def plot_rsr(self):
 
@@ -384,7 +437,7 @@ class Spectral():
         for ii in prange(len(fwhm)):
             sig = Gamma2sigma(fwhm[ii])
             rsr = gaussian(wl_signal, wl[ii], sig)
-            signal_[ii] = np.trapz((signal * rsr), wl_signal) / np.trapz(rsr, wl_signal)
+            signal_[ii] = np.trapezoid((signal * rsr), wl_signal) / np.trapezoid(rsr, wl_signal)
         return signal_
 
     @staticmethod
@@ -394,7 +447,8 @@ class Spectral():
             signal,
             wl,
             fwhm,
-            expon=2.
+            expon=2.,
+            threshold=1e-6
     ):
         '''
         Convolution assuming Dirac for signal source spectral response
@@ -402,26 +456,37 @@ class Spectral():
         :param signal: numpy of signal to convolve, coord=wl_signal
         :param wl: numpy of wavelength coordinates of signal
         :param fwhm: numpy with data=fwhm containing full width at half maximum in nm
+        :param threshold: minimum values of the response function to be included in the convolution
         :return: numpy of convoluted signal
         '''
+
         Nwl = len(wl)
-        signal_ = np.full((Nwl), np.nan, dtype=np.float32)
+        response = np.full((Nwl), np.nan, dtype=np.float32)
         for ii in prange(len(fwhm)):
             sig = super_gaussian_fwhm2sigma(fwhm[ii], expon)
             rsr = super_gaussian(wl_signal, mu=wl[ii], sigma=sig, expon=expon)
-            signal_[ii] = np.trapz((signal * rsr), wl_signal) / np.trapz(rsr, wl_signal)
-        return signal_
+
+            # remove values above a given threshold to speed up computation
+            idx = rsr > threshold
+            wl_signal_ =wl_signal[idx]
+            signal_ = signal[idx]
+            rsr = rsr[idx]
+
+            response[ii] = np.trapezoid((signal_ * rsr), wl_signal_) / np.trapezoid(rsr, wl_signal_)
+        return response
 
     def convolve2(self,
                   signal,
                   name='signal',
-                  expon=1,
+                  expon=3,
+                  threshold=1e-4,
                   info={}):
         '''
         Convolve with spectral response of sensor based on full width at half maximum of each band
         :param signal: xarray spectral signal to convolve, coord=wl
         :param fwhm: xarray with data=fwhm containing full width at half maximum in nm, and coords=wl
         :param info: optional parameter to feed the attributes of the output xarray
+        :param threshold: minimum values of the response function to be included in the convolution
         :return:
         '''
 
@@ -429,12 +494,13 @@ class Spectral():
         fwhm = self.fwhm.values
         wl = self.fwhm.wl.values
         xdims = signal.dims
-
+        attrs=signal.attrs
+        name=signal.name
         if len(xdims) == 1:
-            signal_int = self.convolve2_(wl_ref, signal.values, wl, fwhm, expon)
+            signal_int = self.convolve2_(wl_ref, signal.values, wl, fwhm, expon, threshold=threshold)
             signal_int = xr.DataArray(signal_int, name=name,
                                       coords={'wl': self.fwhm.wl.values},
-                                      attrs=info)
+                                      attrs=attrs)
 
         else:
             # to handle multidimensional xarray
@@ -453,8 +519,8 @@ class Spectral():
                                            dim: value})
                     xsignal_int_.append(_)
                 xsignal_int.append(xr.concat(xsignal_int_, dim=dim))
-            signal_int = xr.merge(xsignal_int).to_dataarray()
-            signal_int.attrs = info
+            signal_int = xr.merge(xsignal_int)#.to_dataarray()
+            signal_int.attrs = attrs
 
         return signal_int
 
